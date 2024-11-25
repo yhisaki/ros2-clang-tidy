@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple
 
 import argcomplete
 import tqdm
+import json
 
 
 def get_all_packages() -> Dict[str, Path]:
@@ -64,7 +65,7 @@ def filter_packages_by_base_path(
     return filtered_packages
 
 
-def find_cpp_source_files(package_path: Path) -> List[Path]:
+def find_cpp_files(package_path: Path) -> List[Path]:
     """
     Recursively find all C++ source and header files within a package, excluding 'test' directories.
 
@@ -98,14 +99,14 @@ class ClangTidyPackageScanner:
 
     def __init__(self):
         self.package_paths: Dict[str, Path] = {}
-        self.package_source_files: Dict[str, List[Path]] = {}
+        self.package_cpp_files: Dict[str, List[Path]] = {}
 
         all_packages = get_all_packages()
         for package_name, package_path in all_packages.items():
-            cpp_files = find_cpp_source_files(package_path)
+            cpp_files = find_cpp_files(package_path)
             if cpp_files:
                 self.package_paths[package_name] = package_path
-                self.package_source_files[package_name] = cpp_files
+                self.package_cpp_files[package_name] = cpp_files
 
     def apply_base_path_filter(self, base_path: str):
         """
@@ -115,9 +116,9 @@ class ClangTidyPackageScanner:
             base_path: The base directory to filter packages.
         """
         self.package_paths = filter_packages_by_base_path(self.package_paths, base_path)
-        self.package_source_files = {
+        self.package_cpp_files = {
             pkg: sources
-            for pkg, sources in self.package_source_files.items()
+            for pkg, sources in self.package_cpp_files.items()
             if pkg in self.package_paths
         }
 
@@ -131,7 +132,7 @@ class ClangTidyPackageScanner:
         for package_name in list(self.package_paths.keys()):
             if package_name not in selected_packages:
                 self.package_paths.pop(package_name)
-                self.package_source_files.pop(package_name)
+                self.package_cpp_files.pop(package_name)
 
     def list_available_packages(self) -> List[str]:
         """
@@ -144,6 +145,7 @@ class ClangTidyPackageScanner:
 
 
 def build_clang_tidy_command(
+    clang_tidy_cmd: str,
     package_name: str,
     package_path: str,
     source_file: str,
@@ -151,6 +153,7 @@ def build_clang_tidy_command(
     config_file: str,
     fix_errors: bool,
     export_fixes_path: str,
+    use_color: bool,
 ) -> List[str]:
     """
     Construct the clang-tidy command with the provided parameters.
@@ -167,7 +170,7 @@ def build_clang_tidy_command(
     Returns:
         A list of command-line arguments for clang-tidy.
     """
-    command = ["clang-tidy"]
+    command = [clang_tidy_cmd]
     command += ["-p", f"build/{package_name}"]
     command += [f"--header-filter={package_path}/.*"]
 
@@ -183,9 +186,30 @@ def build_clang_tidy_command(
     if export_fixes_path:
         command += [f"--export-fixes={export_fixes_path}"]
 
+    if use_color:
+        command += ["--use-color"]
+
     command += [source_file]
 
     return command
+
+
+def filter_source_files_by_compile_commands(
+    source_files: List[Path], package_name: str
+):
+    """
+    Filter source files by the compile_commands.json file.
+    """
+    source_files = [path for path in source_files if path.suffix.lower() in ".cpp"]
+    header_files = [
+        path for path in source_files if path.suffix.lower() in {".hpp", ".h"}
+    ]
+    compile_commands_json = json.load(
+        open(f"build/{package_name}/compile_commands.json")
+    )
+    builded_files = [Path(entry["file"]) for entry in compile_commands_json]
+    source_files = [path for path in source_files if path in builded_files]
+    return source_files + header_files
 
 
 def main():
@@ -198,7 +222,12 @@ def main():
         description="Analyze C++ code style using clang-tidy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-
+    parser.add_argument(
+        "--clang-tidy-cmd",
+        type=str,
+        default="clang-tidy",
+        help="Clang-tidy command to use.",
+    )
     parser.add_argument(
         "--config",
         type=str,
@@ -257,6 +286,11 @@ def main():
         default=None,
         help="Directory where clang-tidy outputs will be stored.",
     )
+    parser.add_argument(
+        "--use-color",
+        action="store_true",
+        help="Use color in the output.",
+    )
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
@@ -267,7 +301,7 @@ def main():
     if args.base_path:
         scanner.apply_base_path_filter(args.base_path)
 
-    total_packages = len(scanner.package_source_files)
+    total_packages = len(scanner.package_cpp_files)
     print(f"Processing {total_packages} package(s)")
 
     def process_package(package_name: str):
@@ -278,20 +312,23 @@ def main():
             package_name: Name of the package to process.
         """
         package_path = scanner.package_paths[package_name]
-        source_files = scanner.package_source_files[package_name]
+        cpp_files = scanner.package_cpp_files[package_name]
+        cpp_files = filter_source_files_by_compile_commands(cpp_files, package_name)
 
         with ThreadPool(args.jobs) as pool:
             clang_tidy_commands = []
 
-            for source_file in source_files:
+            for source_file in cpp_files:
                 command = build_clang_tidy_command(
+                    clang_tidy_cmd=args.clang_tidy_cmd,
                     package_name=package_name,
-                    package_path=str(package_path),
-                    source_file=str(source_file),
+                    package_path=str(package_path.relative_to(Path.cwd())),
+                    source_file=str(source_file.relative_to(Path.cwd())),
                     config=args.config,
                     config_file=args.config_file,
                     fix_errors=args.fix_errors,
                     export_fixes_path=args.export_fixes,
+                    use_color=args.use_color,
                 )
                 clang_tidy_commands.append(command)
                 if args.verbose:

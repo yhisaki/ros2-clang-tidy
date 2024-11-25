@@ -31,14 +31,15 @@ This will analyze all detected C++ packages using default settings.
 ### Options
 
 ```bash
-usage: ros2-clang-tidy [-h] [--config CONFIG] [--config-file CONFIG_FILE]
+usage: ros2-clang-tidy [-h] [--clang-tidy-cmd CLANG_TIDY_CMD] [--config CONFIG] [--config-file CONFIG_FILE]
                            [--jobs JOBS] [--explain-config] [--export-fixes EXPORT_FIXES]
                            [--fix-errors] [--packages-select [PACKAGE_NAME ...]]
-                           [--base-path BASE_PATH] [--verbose] [--output-dir OUTPUT_DIR]
+                           [--base-path BASE_PATH] [--verbose] [--output-dir OUTPUT_DIR] [--use-color]
 ```
 
 #### Arguments
 
+- `clang-tidy-cmd`: Path to the clang-tidy executable. *(Default: clang-tidy)*
 - `--config CONFIG`: Clang-tidy configuration string.
 - `--config-file CONFIG_FILE`: Path to the clang-tidy configuration file.
 - `--jobs JOBS`: Number of clang-tidy jobs to run in parallel. *(Default: 1)*
@@ -49,10 +50,27 @@ usage: ros2-clang-tidy [-h] [--config CONFIG] [--config-file CONFIG_FILE]
 - `--base-path BASE_PATH`: Base directory path to filter packages.
 - `--verbose`: Enable verbose output.
 - `--output-dir OUTPUT_DIR`: Directory where clang-tidy outputs will be stored.
+- `--use-color`: Enable colored output.
 
 ### Interactive Completion
 
 ROS2 Clang-Tidy supports [argcomplete](https://github.com/kislyuk/argcomplete) for tab-completion of command-line arguments. To enable it, follow the [argcomplete installation instructions](https://kislyuk.github.io/argcomplete/#global-activation).
+
+#### Bash/Zsh
+
+```bash
+activate-global-python-argcomplete
+```
+or
+```bash
+eval "$(register-python-argcomplete ros2-clang-tidy)"
+```
+
+#### Fish
+
+```bash
+register-python-argcomplete --shell fish ros2-clang-tidy | source
+```
 
 ## License
 
