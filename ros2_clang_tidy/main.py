@@ -161,6 +161,7 @@ class ClangTidyPackageScanner:
 
 def build_clang_tidy_command(
     clang_tidy_cmd: str,
+    package_name: str,
     package_path: str,
     source_file: str,
     config: str,
@@ -185,7 +186,7 @@ def build_clang_tidy_command(
         A list of command-line arguments for clang-tidy.
     """
     command = [clang_tidy_cmd]
-    command += ["-p", "build/"]
+    command += ["-p", f"build/{package_name}"]
     command += [f"--header-filter={package_path}/.*"]
 
     if config:
@@ -208,6 +209,10 @@ def build_clang_tidy_command(
     return command
 
 
+def parse_result(result: subprocess.CompletedProcess) -> str:
+    return f"Command: {' '.join(result.args)}\n{result.stderr}\n{result.stdout}\n"
+
+
 def process_packages(scanner: ClangTidyPackageScanner, args):
     """
     Process all packages using a shared thread pool for parallel execution.
@@ -219,6 +224,7 @@ def process_packages(scanner: ClangTidyPackageScanner, args):
     from concurrent.futures import ThreadPoolExecutor
 
     total_errors = 0
+    total_warnings = 0
     clang_tidy_commands = []
     package_file_map = {}
 
@@ -231,8 +237,9 @@ def process_packages(scanner: ClangTidyPackageScanner, args):
         for source_file in cpp_files:
             command = build_clang_tidy_command(
                 clang_tidy_cmd=args.clang_tidy_cmd,
-                package_path=str(package_path.relative_to(Path.cwd())),
-                source_file=str(source_file.relative_to(Path.cwd())),
+                package_name=package_name,
+                package_path=str(package_path),
+                source_file=str(source_file),
                 config=args.config,
                 config_file=args.config_file,
                 fix_errors=args.fix_errors,
@@ -241,7 +248,9 @@ def process_packages(scanner: ClangTidyPackageScanner, args):
             )
             clang_tidy_commands.append((package_name, command))
 
-    def execute_command(cmd_info: Tuple[str, List[str]]) -> Tuple[str, int]:
+    def execute_command(
+        cmd_info: Tuple[str, List[str]]
+    ) -> Tuple[str, subprocess.CompletedProcess[str]]:
         """
         Execute a single clang-tidy command.
 
@@ -260,16 +269,24 @@ def process_packages(scanner: ClangTidyPackageScanner, args):
                 text=True,
                 check=False,  # Continue even if clang-tidy reports issues
             )
-            combined_output = (
-                f"Command: {' '.join(cmd)}\n{result.stdout}\n{result.stderr}\n"
-            )
-            error_count = combined_output.count("error: ")
-            return package_name, combined_output, error_count
+
+            has_some_output = len(result.stdout) > 0 or len(result.stderr) > 0
+
+            if args.output_dir:
+                os.makedirs(args.output_dir, exist_ok=True)
+                if args.output_all or has_some_output:
+                    log_file_path = os.path.join(args.output_dir, f"{package_name}.log")
+                    with open(log_file_path, "a") as log_file:
+                        log_file.write(parse_result(result))
+
+            return package_name, result
+
         except Exception as error:
             return (
                 package_name,
-                f"Error executing command {' '.join(cmd)}: {error}\n",
-                1,
+                subprocess.CompletedProcess(
+                    args=cmd, returncode=1, stdout="", stderr=str(error)
+                ),
             )
 
     # Use a shared thread pool to execute all commands
@@ -278,35 +295,28 @@ def process_packages(scanner: ClangTidyPackageScanner, args):
             tqdm.tqdm(
                 executor.map(execute_command, clang_tidy_commands),
                 total=len(clang_tidy_commands),
-                desc="Processing all files",
+                desc="Running clang-tidy",
             )
         )
 
     # Collect and process results
     package_errors = {}
-    for package_name, output, error_count in results:
+    for package_name, result in results:
+        error_count = result.stdout.count("error: ")
+        warning_count = result.stdout.count("warning: ")
         total_errors += error_count
+        total_warnings += warning_count
         if package_name not in package_errors:
             package_errors[package_name] = 0
         package_errors[package_name] += error_count
 
-        if args.output_dir:
-            os.makedirs(args.output_dir, exist_ok=True)
-            log_file_path = os.path.join(args.output_dir, f"{package_name}.log")
-            with open(
-                log_file_path, "a"
-            ) as log_file:  # Append logs to a single file per package
-                log_file.write(output)
-        else:
-            print(output, file=sys.stdout)
+        if args.output_all or len(result.stdout) > 0 or len(result.stderr) > 0:
+            print(parse_result(result))
 
-    for package_name, error_count in package_errors.items():
-        print(
-            f"Package '{package_name}' encountered {error_count} error(s).",
-            file=sys.stderr,
-        )
+        if args.output_all or error_count > 0 or warning_count > 0:
+            print(f"{package_name}: {error_count} errors, {warning_count} warnings")
 
-    return total_errors
+    return total_errors, total_warnings
 
 
 def main():
@@ -339,6 +349,7 @@ def main():
     )
     parser.add_argument(
         "--jobs",
+        "-j",
         type=int,
         default=1,
         help="Number of clang-tidy jobs to run in parallel.",
@@ -388,6 +399,11 @@ def main():
         action="store_true",
         help="Use color in the output.",
     )
+    parser.add_argument(
+        "--output-all",
+        action="store_true",
+        help="Output all even if no errors or warnings.",
+    )
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
@@ -401,7 +417,10 @@ def main():
     total_packages = len(scanner.package_cpp_files)
     print(f"Processing {total_packages} package(s)")
 
-    total_errors = process_packages(scanner, args)
+    total_errors, total_warnings = process_packages(scanner, args)
+
+    if total_warnings > 0:
+        print(f"Total warnings encountered: {total_warnings}")
 
     if total_errors > 0:
         print(f"Total errors encountered: {total_errors}", file=sys.stderr)
