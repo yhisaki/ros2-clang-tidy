@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -10,7 +11,6 @@ from typing import Dict, List, Tuple
 
 import argcomplete
 import tqdm
-import json
 
 
 def get_all_packages() -> Dict[str, Path]:
@@ -86,9 +86,21 @@ def find_cpp_files(package_path: Path) -> List[Path]:
         for file_name in files:
             file_path = current_root / file_name
 
-            if file_path.suffix.lower() in {".cpp", ".hpp", ".h"}:
+            if file_path.suffix.lower() in ".cpp":
                 cpp_files.append(file_path)
 
+    return cpp_files
+
+
+def filter_cpp_files_by_compile_commands(cpp_files: List[Path], package_name: str):
+    """
+    Filter source files by the compile_commands.json file.
+    """
+    compile_commands_json = json.load(
+        open(f"build/{package_name}/compile_commands.json")
+    )
+    builded_files = [Path(entry["file"]) for entry in compile_commands_json]
+    cpp_files = [path for path in cpp_files if path in builded_files]
     return cpp_files
 
 
@@ -104,6 +116,7 @@ class ClangTidyPackageScanner:
         all_packages = get_all_packages()
         for package_name, package_path in all_packages.items():
             cpp_files = find_cpp_files(package_path)
+            cpp_files = filter_cpp_files_by_compile_commands(cpp_files, package_name)
             if cpp_files:
                 self.package_paths[package_name] = package_path
                 self.package_cpp_files[package_name] = cpp_files
@@ -146,7 +159,6 @@ class ClangTidyPackageScanner:
 
 def build_clang_tidy_command(
     clang_tidy_cmd: str,
-    package_name: str,
     package_path: str,
     source_file: str,
     config: str,
@@ -171,7 +183,7 @@ def build_clang_tidy_command(
         A list of command-line arguments for clang-tidy.
     """
     command = [clang_tidy_cmd]
-    command += ["-p", f"build/{package_name}"]
+    command += ["-p", "build/"]
     command += [f"--header-filter={package_path}/.*"]
 
     if config:
@@ -192,24 +204,6 @@ def build_clang_tidy_command(
     command += [source_file]
 
     return command
-
-
-def filter_source_files_by_compile_commands(
-    source_files: List[Path], package_name: str
-):
-    """
-    Filter source files by the compile_commands.json file.
-    """
-    source_files = [path for path in source_files if path.suffix.lower() in ".cpp"]
-    header_files = [
-        path for path in source_files if path.suffix.lower() in {".hpp", ".h"}
-    ]
-    compile_commands_json = json.load(
-        open(f"build/{package_name}/compile_commands.json")
-    )
-    builded_files = [Path(entry["file"]) for entry in compile_commands_json]
-    source_files = [path for path in source_files if path in builded_files]
-    return source_files + header_files
 
 
 def main():
@@ -311,9 +305,11 @@ def main():
         Args:
             package_name: Name of the package to process.
         """
+
+        print(f"Starting >>> {package}")
+
         package_path = scanner.package_paths[package_name]
         cpp_files = scanner.package_cpp_files[package_name]
-        cpp_files = filter_source_files_by_compile_commands(cpp_files, package_name)
 
         with ThreadPool(args.jobs) as pool:
             clang_tidy_commands = []
@@ -321,7 +317,6 @@ def main():
             for source_file in cpp_files:
                 command = build_clang_tidy_command(
                     clang_tidy_cmd=args.clang_tidy_cmd,
-                    package_name=package_name,
                     package_path=str(package_path.relative_to(Path.cwd())),
                     source_file=str(source_file.relative_to(Path.cwd())),
                     config=args.config,
@@ -394,14 +389,15 @@ def main():
                 file=sys.stderr,
             )
 
+        print(f"Finished <<< {package}")
+
         return total_package_errors
 
     total_errors = 0
 
     for package in scanner.list_available_packages():
-        print(f"Starting >>> {package}")
+        num_jobs_to_process_package = len(scanner.package_cpp_files[package])
         total_errors += process_package(package)
-        print(f"Finished <<< {package}")
 
     if total_errors > 0:
         print(f"Total errors encountered: {total_errors}", file=sys.stderr)
